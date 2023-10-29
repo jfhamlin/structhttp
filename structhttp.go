@@ -4,19 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"reflect"
 )
 
 type (
-	options struct {
-		matcher MatcherFunc
-	}
-
-	// Option is an option for Handler.
-	Option func(*options)
-
 	// MatcherFunc is a function that determines whether a request
 	// matches a method. It returns the non-default arguments to pass to
 	// the method, a boolean indicating whether the request matches, and
@@ -38,14 +30,6 @@ var (
 	ctxType   = reflect.TypeOf((*context.Context)(nil)).Elem()
 	reqType   = reflect.TypeOf((*http.Request)(nil))
 )
-
-// WithMatcherFunc returns an Option that sets the MatcherFunc for
-// Handler.
-func WithMatcherFunc(m MatcherFunc) Option {
-	return func(o *options) {
-		o.matcher = m
-	}
-}
 
 // Handler returns an http.Handler for the given struct.
 //
@@ -158,29 +142,6 @@ func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-func DefaultMatcherFunc(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
-	if r.Method != "POST" || r.URL.Path != "/"+methodName {
-		return nil, false, nil
-	}
-
-	if len(methodArgs) == 0 {
-		return nil, true, nil
-	}
-
-	if len(methodArgs) > 1 {
-		return nil, false, nil
-	}
-
-	argType := methodArgs[0]
-	arg := reflect.New(argType)
-	if err := json.NewDecoder(r.Body).Decode(arg.Interface()); err != nil {
-		return nil, true, NewError(http.StatusBadRequest, fmt.Errorf("failed to decode request body: %w", err))
-	}
-	return []any{arg.Elem().Interface()}, true, nil
-}
-
 func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 	if len(out) == 0 {
 		w.WriteHeader(http.StatusNoContent)
@@ -207,7 +168,7 @@ func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 
 	// special case for returning []byte
 	if bytes, ok := out[0].Interface().([]byte); ok {
-		w.Write(bytes)
+		_, _ = w.Write(bytes)
 		return
 	}
 
