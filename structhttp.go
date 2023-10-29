@@ -4,36 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"reflect"
 )
 
 type (
-	options struct {
-		matcher MatcherFunc
-	}
-
-	// Option is an option for Handler.
-	Option func(*options)
-
 	// MatcherFunc is a function that determines whether a request
 	// matches a method. It returns the non-default arguments to pass to
 	// the method, a boolean indicating whether the request matches, and
 	// an error if one occurred.
 	MatcherFunc func(r *http.Request, methodName string, methodArgs ...reflect.Type) (arguments []any, matches bool, err error)
-
-	// HTTPStatusCoder is an interface for errors that can return an
-	// HTTP status code.
-	HTTPStatusCoder interface {
-		HTTPStatusCode() int
-	}
-
-	// Error is an error that can return an HTTP status code.
-	Error struct {
-		StatusCode int
-		Err        error
-	}
 
 	structHandler struct {
 		structValue reflect.Value
@@ -50,14 +30,6 @@ var (
 	ctxType   = reflect.TypeOf((*context.Context)(nil)).Elem()
 	reqType   = reflect.TypeOf((*http.Request)(nil))
 )
-
-// WithMatcherFunc returns an Option that sets the MatcherFunc for
-// Handler.
-func WithMatcherFunc(m MatcherFunc) Option {
-	return func(o *options) {
-		o.matcher = m
-	}
-}
 
 // Handler returns an http.Handler for the given struct.
 //
@@ -77,6 +49,7 @@ func WithMatcherFunc(m MatcherFunc) Option {
 // # Return Values
 //
 // The method may return any of the following:
+//
 // 1. Nothing
 // 2. An error
 // 3. A single value
@@ -169,29 +142,6 @@ func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-func DefaultMatcherFunc(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
-	if r.Method != "POST" || r.URL.Path != "/"+methodName {
-		return nil, false, nil
-	}
-
-	if len(methodArgs) == 0 {
-		return nil, true, nil
-	}
-
-	if len(methodArgs) > 1 {
-		return nil, false, nil
-	}
-
-	argType := methodArgs[0]
-	arg := reflect.New(argType)
-	if err := json.NewDecoder(r.Body).Decode(arg.Interface()); err != nil {
-		return nil, true, NewError(http.StatusBadRequest, fmt.Errorf("failed to decode request body: %w", err))
-	}
-	return []any{arg.Elem().Interface()}, true, nil
-}
-
 func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 	if len(out) == 0 {
 		w.WriteHeader(http.StatusNoContent)
@@ -216,6 +166,12 @@ func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 		}
 	}
 
+	// special case for returning []byte
+	if bytes, ok := out[0].Interface().([]byte); ok {
+		_, _ = w.Write(bytes)
+		return
+	}
+
 	// encode the first return value
 	if err := json.NewEncoder(w).Encode(out[0].Interface()); err != nil {
 		panic(err)
@@ -238,28 +194,4 @@ func allowedMethod(typ reflect.Type) bool {
 	}
 
 	return true
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Status code error
-
-// NewError returns a new Error with the given status code and wrapped
-// error.
-func NewError(statusCode int, err error) *Error {
-	return &Error{
-		StatusCode: statusCode,
-		Err:        err,
-	}
-}
-
-func (e *Error) Error() string {
-	return e.Err.Error()
-}
-
-func (e *Error) HTTPStatusCode() int {
-	return e.StatusCode
-}
-
-func (e *Error) Unwrap() error {
-	return e.Err
 }

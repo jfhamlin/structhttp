@@ -3,8 +3,12 @@ package structhttp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -19,10 +23,8 @@ type (
 		ID   int
 		Name string
 	}
-)
 
-func TestHandlerDefault(t *testing.T) {
-	testCases := []struct {
+	testCase struct {
 		name               string
 		httpMethod         string
 		path               string
@@ -31,7 +33,66 @@ func TestHandlerDefault(t *testing.T) {
 		err                error
 		expectedStatusCode int
 		expectedBody       string
-	}{
+	}
+)
+
+func (a *app) NoResult() {}
+
+func (a *app) OnlyError() error {
+	return a.err
+}
+
+func (a *app) OnlyResult() any {
+	return a.result
+}
+
+func (a *app) ErrorAndResult() (any, error) {
+	return a.result, a.err
+}
+
+func (a *app) Inputs(ctx context.Context, param *testArgs) (*testArgs, error) {
+	return param, a.err
+}
+
+func (a *app) Bytes() ([]byte, error) {
+	return a.result.([]byte), a.err
+}
+
+func (a *app) GetThing() (any, error) {
+	return a.result, a.err
+}
+
+func (a *app) TooManyArgs(foo, bar, baz int) error {
+	return a.err
+}
+
+func runTests(t *testing.T, testCases []testCase, opts ...Option) {
+	t.Helper()
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			handler := Handler(&app{err: tc.err, result: tc.result}, opts...)
+
+			req := httptest.NewRequest(tc.httpMethod, tc.path, nil)
+			if tc.body != "" {
+				req.Body = io.NopCloser(strings.NewReader(tc.body))
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tc.expectedStatusCode {
+				t.Errorf("expected status code %d, got %d", tc.expectedStatusCode, w.Code)
+			}
+			if w.Body.String() != tc.expectedBody {
+				t.Errorf("expected body %q, got %q", tc.expectedBody, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerDefault(t *testing.T) {
+	testCases := []testCase{
 		{
 			name:               "no result",
 			httpMethod:         "POST",
@@ -103,44 +164,64 @@ func TestHandlerDefault(t *testing.T) {
 			expectedStatusCode: 400,
 			expectedBody:       "failed to decode request body: EOF\n",
 		},
+		{
+			name:               "bytes, no error",
+			httpMethod:         "POST",
+			path:               "/Bytes",
+			result:             []byte("foo"),
+			expectedStatusCode: 200,
+			expectedBody:       "foo",
+		},
+		{
+			name:               "too many args, no match",
+			httpMethod:         "POST",
+			path:               "/TooManyArgs",
+			expectedStatusCode: 404,
+			expectedBody:       "404 page not found\n",
+		},
 	}
 
-	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			handler := Handler(&app{err: tc.err, result: tc.result})
+	runTests(t, testCases)
+}
 
-			req := httptest.NewRequest(tc.httpMethod, tc.path, nil)
-			if tc.body != "" {
-				req.Body = io.NopCloser(strings.NewReader(tc.body))
-			}
-			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, req)
-
-			if w.Code != tc.expectedStatusCode {
-				t.Errorf("expected status code %d, got %d", tc.expectedStatusCode, w.Code)
-			}
-			if w.Body.String() != tc.expectedBody {
-				t.Errorf("expected body %q, got %q", tc.expectedBody, w.Body.String())
-			}
-		})
+func TestHandlerCustomMatcher(t *testing.T) {
+	testCases := []testCase{
+		{
+			name:       "GET /thing/[id]",
+			httpMethod: "GET",
+			path:       "/thing/1",
+			result: map[string]string{
+				"id": "1",
+			},
+			expectedStatusCode: 200,
+			expectedBody:       "{\"id\":\"1\"}\n",
+		},
 	}
-}
 
-func (a *app) NoResult() {}
+	matcherFunc := func(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
+		switch {
+		case strings.HasPrefix(methodName, "Get"):
+			if r.Method != http.MethodGet {
+				return nil, false, nil
+			}
 
-func (a *app) OnlyError() error {
-	return a.err
-}
+			if len(methodArgs) == 0 {
+				return nil, true, nil
+			}
+			if len(methodArgs) > 1 {
+				return nil, false, nil
+			}
+			re := regexp.MustCompile(fmt.Sprintf(`^\/%s\/([a-zA-Z0-9_-]+)$`, strings.ToLower(methodName[3:])))
+			m := re.FindStringSubmatch(r.URL.Path)
+			if len(m) != 2 {
+				return nil, false, nil
+			}
 
-func (a *app) OnlyResult() any {
-	return a.result
-}
+			return []any{m[1]}, true, nil
+		}
 
-func (a *app) ErrorAndResult() (any, error) {
-	return a.result, a.err
-}
+		return DefaultMatcherFunc(r, methodName, methodArgs...)
+	}
 
-func (a *app) Inputs(ctx context.Context, param *testArgs) (*testArgs, error) {
-	return param, a.err
+	runTests(t, testCases, WithMatcherFunc(matcherFunc))
 }
