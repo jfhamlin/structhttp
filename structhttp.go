@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 )
@@ -18,8 +19,9 @@ type (
 
 	// MatcherFunc is a function that determines whether a request
 	// matches a method. It returns the non-default arguments to pass to
-	// the method, and a boolean indicating whether the request matches.
-	MatcherFunc func(r *http.Request, methodName string) (arguments []any, matches bool)
+	// the method, a boolean indicating whether the request matches, and
+	// an error if one occurred.
+	MatcherFunc func(r *http.Request, method reflect.Method) (arguments []any, matches bool, err error)
 
 	// HTTPStatusCoder is an interface for errors that can return an
 	// HTTP status code.
@@ -35,7 +37,7 @@ type (
 
 	structHandler struct {
 		structValue reflect.Value
-		methods     map[string]reflect.Value
+		methods     []reflect.Method
 
 		matcher MatcherFunc
 	}
@@ -99,7 +101,6 @@ func Handler(s any, opts ...Option) http.Handler {
 	sv := reflect.ValueOf(s)
 	sh := &structHandler{
 		structValue: sv,
-		methods:     make(map[string]reflect.Value),
 		matcher:     o.matcher,
 	}
 
@@ -110,14 +111,110 @@ func Handler(s any, opts ...Option) http.Handler {
 			continue
 		}
 
-		sh.methods[m.Name] = sv.Method(i)
+		sh.methods = append(sh.methods, m)
 	}
 
 	return sh
 }
 
-func defaultMatcher(r *http.Request, methodName string) ([]any, bool) {
-	return nil, r.Method == "POST" && r.URL.Path == "/"+methodName
+func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	for _, method := range sh.methods {
+		args, matches, err := sh.matcher(r, method)
+		if !matches {
+			continue
+		}
+		if err != nil {
+			writeResponse(w, []reflect.Value{reflect.ValueOf(err)})
+			return
+		}
+
+		name := method.Name
+
+		methodArgs := make([]reflect.Value, method.Type.NumIn())
+		methodArgs[0] = sh.structValue
+		for i := 1; i < method.Type.NumIn(); i++ {
+			argType := method.Type.In(i)
+			switch argType {
+			case ctxType:
+				methodArgs[i] = reflect.ValueOf(r.Context())
+			case reqType:
+				methodArgs[i] = reflect.ValueOf(r)
+			default:
+				if len(args) == 0 {
+					panic("not enough arguments to " + name + " method")
+				}
+				methodArgs[i] = reflect.ValueOf(args[0])
+				args = args[1:]
+			}
+		}
+		if len(args) > 0 {
+			panic("too many arguments to " + name + " method")
+		}
+
+		result := method.Func.Call(methodArgs)
+		writeResponse(w, result)
+		return
+	}
+
+	http.NotFound(w, r)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func defaultMatcher(r *http.Request, method reflect.Method) ([]any, bool, error) {
+	if r.Method != "POST" || r.URL.Path != "/"+method.Name {
+		return nil, false, nil
+	}
+
+	if method.Type.NumIn() == 1 {
+		return nil, true, nil
+	}
+
+	for i := 1; i < method.Type.NumIn(); i++ {
+		argType := method.Type.In(i)
+		switch argType {
+		case ctxType:
+		case reqType:
+		default:
+			arg := reflect.New(argType)
+			if err := json.NewDecoder(r.Body).Decode(arg.Interface()); err != nil {
+				return nil, true, NewError(http.StatusBadRequest, fmt.Errorf("failed to decode request body: %w", err))
+			}
+			return []any{arg.Elem().Interface()}, true, nil
+		}
+	}
+
+	return nil, true, nil
+}
+
+func writeResponse(w http.ResponseWriter, out []reflect.Value) {
+	if len(out) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	last := out[len(out)-1]
+	if last.Type().Implements(errorType) {
+		if !last.IsNil() {
+			code := http.StatusInternalServerError
+			var statusCoder HTTPStatusCoder
+			if errors.As(last.Interface().(error), &statusCoder) {
+				code = statusCoder.HTTPStatusCode()
+			}
+			http.Error(w, last.Interface().(error).Error(), code)
+
+			return
+		}
+		if len(out) == 1 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	// encode the first return value
+	if err := json.NewEncoder(w).Encode(out[0].Interface()); err != nil {
+		panic(err)
+	}
 }
 
 func allowedMethod(typ reflect.Type) bool {
@@ -136,65 +233,6 @@ func allowedMethod(typ reflect.Type) bool {
 	}
 
 	return true
-}
-
-func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	for name, method := range sh.methods {
-		args, matches := sh.matcher(r, name)
-		if !matches {
-			continue
-		}
-
-		methodArgs := make([]reflect.Value, method.Type().NumIn())
-		for i := 0; i < method.Type().NumIn(); i++ {
-			argType := method.Type().In(i)
-			switch argType {
-			case ctxType:
-				methodArgs[i] = reflect.ValueOf(r.Context())
-			case reqType:
-				methodArgs[i] = reflect.ValueOf(r)
-			default:
-				if len(args) == 0 {
-					panic("not enough arguments")
-				}
-				methodArgs[i] = reflect.ValueOf(args[0])
-				args = args[1:]
-			}
-		}
-
-		result := method.Call(nil)
-		if len(result) == 0 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		last := result[len(result)-1]
-		if last.Type().Implements(errorType) {
-			if !last.IsNil() {
-				code := http.StatusInternalServerError
-				var statusCoder HTTPStatusCoder
-				if errors.As(last.Interface().(error), &statusCoder) {
-					code = statusCoder.HTTPStatusCode()
-				}
-				http.Error(w, last.Interface().(error).Error(), code)
-
-				return
-			}
-			if len(result) == 1 {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-
-		// encode the first return value
-		out := result[0].Interface()
-		if err := json.NewEncoder(w).Encode(out); err != nil {
-			panic(err)
-		}
-		return
-	}
-
-	http.NotFound(w, r)
 }
 
 ////////////////////////////////////////////////////////////////////////////////

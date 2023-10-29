@@ -1,8 +1,11 @@
 package structhttp
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -11,6 +14,11 @@ type (
 		result any
 		err    error
 	}
+
+	testArgs struct {
+		ID   int
+		Name string
+	}
 )
 
 func TestHandlerDefault(t *testing.T) {
@@ -18,6 +26,7 @@ func TestHandlerDefault(t *testing.T) {
 		name               string
 		httpMethod         string
 		path               string
+		body               string
 		result             any
 		err                error
 		expectedStatusCode int
@@ -78,6 +87,22 @@ func TestHandlerDefault(t *testing.T) {
 			expectedStatusCode: 500,
 			expectedBody:       "test error\n",
 		},
+		{
+			name:               "inputs, no error",
+			httpMethod:         "POST",
+			path:               "/Inputs",
+			body:               "{\"ID\":1,\"Name\":\"foo\"}",
+			expectedStatusCode: 200,
+			expectedBody:       "{\"ID\":1,\"Name\":\"foo\"}\n",
+		},
+		{
+			name:               "inputs, malformed request",
+			httpMethod:         "POST",
+			path:               "/Inputs",
+			body:               "",
+			expectedStatusCode: 400,
+			expectedBody:       "failed to decode request body: EOF\n",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -86,6 +111,9 @@ func TestHandlerDefault(t *testing.T) {
 			handler := Handler(&app{err: tc.err, result: tc.result})
 
 			req := httptest.NewRequest(tc.httpMethod, tc.path, nil)
+			if tc.body != "" {
+				req.Body = io.NopCloser(strings.NewReader(tc.body))
+			}
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 
@@ -111,4 +139,8 @@ func (a *app) OnlyResult() any {
 
 func (a *app) ErrorAndResult() (any, error) {
 	return a.result, a.err
+}
+
+func (a *app) Inputs(ctx context.Context, param *testArgs) (*testArgs, error) {
+	return param, a.err
 }
