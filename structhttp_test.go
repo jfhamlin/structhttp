@@ -103,6 +103,14 @@ func TestHandlerDefault(t *testing.T) {
 			expectedStatusCode: 400,
 			expectedBody:       "failed to decode request body: EOF\n",
 		},
+		{
+			name:               "bytes, no error",
+			httpMethod:         "POST",
+			path:               "/Bytes",
+			result:             []byte("foo"),
+			expectedStatusCode: 200,
+			expectedBody:       "foo",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -143,4 +151,8 @@ func (a *app) ErrorAndResult() (any, error) {
 
 func (a *app) Inputs(ctx context.Context, param *testArgs) (*testArgs, error) {
 	return param, a.err
+}
+
+func (a *app) Bytes() ([]byte, error) {
+	return a.result.([]byte), a.err
 }

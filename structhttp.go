@@ -23,18 +23,6 @@ type (
 	// an error if one occurred.
 	MatcherFunc func(r *http.Request, methodName string, methodArgs ...reflect.Type) (arguments []any, matches bool, err error)
 
-	// HTTPStatusCoder is an interface for errors that can return an
-	// HTTP status code.
-	HTTPStatusCoder interface {
-		HTTPStatusCode() int
-	}
-
-	// Error is an error that can return an HTTP status code.
-	Error struct {
-		StatusCode int
-		Err        error
-	}
-
 	structHandler struct {
 		structValue reflect.Value
 		methods     []reflect.Method
@@ -77,6 +65,7 @@ func WithMatcherFunc(m MatcherFunc) Option {
 // # Return Values
 //
 // The method may return any of the following:
+//
 // 1. Nothing
 // 2. An error
 // 3. A single value
@@ -216,6 +205,12 @@ func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 		}
 	}
 
+	// special case for returning []byte
+	if bytes, ok := out[0].Interface().([]byte); ok {
+		w.Write(bytes)
+		return
+	}
+
 	// encode the first return value
 	if err := json.NewEncoder(w).Encode(out[0].Interface()); err != nil {
 		panic(err)
@@ -238,28 +233,4 @@ func allowedMethod(typ reflect.Type) bool {
 	}
 
 	return true
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Status code error
-
-// NewError returns a new Error with the given status code and wrapped
-// error.
-func NewError(statusCode int, err error) *Error {
-	return &Error{
-		StatusCode: statusCode,
-		Err:        err,
-	}
-}
-
-func (e *Error) Error() string {
-	return e.Err.Error()
-}
-
-func (e *Error) HTTPStatusCode() int {
-	return e.StatusCode
-}
-
-func (e *Error) Unwrap() error {
-	return e.Err
 }
