@@ -92,7 +92,7 @@ func WithMatcherFunc(m MatcherFunc) Option {
 // code will be set to the value returned by HTTPStatusCode().
 func Handler(s any, opts ...Option) http.Handler {
 	o := &options{
-		matcher: defaultMatcher,
+		matcher: DefaultMatcherFunc,
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -171,7 +171,7 @@ func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func defaultMatcher(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
+func DefaultMatcherFunc(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
 	if r.Method != "POST" || r.URL.Path != "/"+methodName {
 		return nil, false, nil
 	}
