@@ -26,7 +26,7 @@ func WithMatcherFunc(m MatcherFunc) Option {
 
 // DefaultMatcherFunc is the default MatcherFunc for Handler.
 func DefaultMatcherFunc(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
-	if r.Method != "POST" || r.URL.Path != "/"+methodName {
+	if r.Method != "POST" || (r.URL.Path != "/"+methodName && r.URL.Path != methodName) {
 		return nil, false, nil
 	}
 
