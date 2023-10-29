@@ -21,7 +21,7 @@ type (
 	// matches a method. It returns the non-default arguments to pass to
 	// the method, a boolean indicating whether the request matches, and
 	// an error if one occurred.
-	MatcherFunc func(r *http.Request, method reflect.Method) (arguments []any, matches bool, err error)
+	MatcherFunc func(r *http.Request, methodName string, methodArgs ...reflect.Type) (arguments []any, matches bool, err error)
 
 	// HTTPStatusCoder is an interface for errors that can return an
 	// HTTP status code.
@@ -66,26 +66,26 @@ func WithMatcherFunc(m MatcherFunc) Option {
 //
 // # Route Mapping
 //
-// # Arguments
-// Method arguments may be provided in the following ways:
-// 1. As a query parameter
-// 2. As a path parameter
-// 3. As a JSON body
-//
-// If a value is provided in multiple ways, precedence is as indicated
-// above.
+// By default, requests are mapped to methods where the HTTP method is
+// POST and the path is the method name prefixed with a slash. If a
+// method accepts an *http.Request or context.Context argument, the
+// value is provided directly from the incoming *http.Request. At most
+// one other argument may be present, and its value will be the
+// request body decoded as JSON. The matching behavior can be
+// customized by providing a MatcherFunc option.
 //
 // # Return Values
+//
 // The method may return any of the following:
 // 1. Nothing
 // 2. An error
 // 3. A single value
 // 4. A single value and an error
 //
-// Methods that return anything else will be omitted from the route
-// table.
+// Methods that return anything else will not be matched.
 //
 // # HTTP Status Codes
+//
 // If the method returns an error, the error's Error() method will be
 // used as the response body, and the status code will be set to 500.
 // If the error implements the HTTPStatusCoder interface, the status
@@ -119,7 +119,17 @@ func Handler(s any, opts ...Option) http.Handler {
 
 func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, method := range sh.methods {
-		args, matches, err := sh.matcher(r, method)
+		argTypes := make([]reflect.Type, 0, method.Type.NumIn()-1)
+		for i := 1; i < method.Type.NumIn(); i++ {
+			typ := method.Type.In(i)
+			switch typ {
+			case ctxType, reqType:
+			default:
+				argTypes = append(argTypes, typ)
+			}
+		}
+
+		args, matches, err := sh.matcher(r, method.Name, argTypes...)
 		if !matches {
 			continue
 		}
@@ -161,30 +171,25 @@ func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func defaultMatcher(r *http.Request, method reflect.Method) ([]any, bool, error) {
-	if r.Method != "POST" || r.URL.Path != "/"+method.Name {
+func defaultMatcher(r *http.Request, methodName string, methodArgs ...reflect.Type) ([]any, bool, error) {
+	if r.Method != "POST" || r.URL.Path != "/"+methodName {
 		return nil, false, nil
 	}
 
-	if method.Type.NumIn() == 1 {
+	if len(methodArgs) == 0 {
 		return nil, true, nil
 	}
 
-	for i := 1; i < method.Type.NumIn(); i++ {
-		argType := method.Type.In(i)
-		switch argType {
-		case ctxType:
-		case reqType:
-		default:
-			arg := reflect.New(argType)
-			if err := json.NewDecoder(r.Body).Decode(arg.Interface()); err != nil {
-				return nil, true, NewError(http.StatusBadRequest, fmt.Errorf("failed to decode request body: %w", err))
-			}
-			return []any{arg.Elem().Interface()}, true, nil
-		}
+	if len(methodArgs) > 1 {
+		return nil, false, nil
 	}
 
-	return nil, true, nil
+	argType := methodArgs[0]
+	arg := reflect.New(argType)
+	if err := json.NewDecoder(r.Body).Decode(arg.Interface()); err != nil {
+		return nil, true, NewError(http.StatusBadRequest, fmt.Errorf("failed to decode request body: %w", err))
+	}
+	return []any{arg.Elem().Interface()}, true, nil
 }
 
 func writeResponse(w http.ResponseWriter, out []reflect.Value) {
