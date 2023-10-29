@@ -1,33 +1,33 @@
 package structhttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"reflect"
 )
 
 type (
 	options struct {
-		routeMapper RouteMapper
+		matcher MatcherFunc
 	}
 
-	Route struct {
-		Method string
-		Path   string
-
-		methodIndex int
-	}
-
-	RouteMapper func(methodName string) *Route
-
+	// Option is an option for Handler.
 	Option func(*options)
 
+	// MatcherFunc is a function that determines whether a request
+	// matches a method. It returns the non-default arguments to pass to
+	// the method, and a boolean indicating whether the request matches.
+	MatcherFunc func(r *http.Request, methodName string) (arguments []any, matches bool)
+
+	// HTTPStatusCoder is an interface for errors that can return an
+	// HTTP status code.
 	HTTPStatusCoder interface {
 		HTTPStatusCode() int
 	}
 
+	// Error is an error that can return an HTTP status code.
 	Error struct {
 		StatusCode int
 		Err        error
@@ -35,7 +35,9 @@ type (
 
 	structHandler struct {
 		structValue reflect.Value
-		routes      []Route
+		methods     map[string]reflect.Value
+
+		matcher MatcherFunc
 	}
 )
 
@@ -43,7 +45,17 @@ var (
 	_ http.Handler = (*structHandler)(nil)
 
 	errorType = reflect.TypeOf((*error)(nil)).Elem()
+	ctxType   = reflect.TypeOf((*context.Context)(nil)).Elem()
+	reqType   = reflect.TypeOf((*http.Request)(nil))
 )
+
+// WithMatcherFunc returns an Option that sets the MatcherFunc for
+// Handler.
+func WithMatcherFunc(m MatcherFunc) Option {
+	return func(o *options) {
+		o.matcher = m
+	}
+}
 
 // Handler returns an http.Handler for the given struct.
 //
@@ -78,7 +90,7 @@ var (
 // code will be set to the value returned by HTTPStatusCode().
 func Handler(s any, opts ...Option) http.Handler {
 	o := &options{
-		routeMapper: defaultRouteMapper,
+		matcher: defaultMatcher,
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -87,6 +99,8 @@ func Handler(s any, opts ...Option) http.Handler {
 	sv := reflect.ValueOf(s)
 	sh := &structHandler{
 		structValue: sv,
+		methods:     make(map[string]reflect.Value),
+		matcher:     o.matcher,
 	}
 
 	for i := 0; i < sv.NumMethod(); i++ {
@@ -96,19 +110,14 @@ func Handler(s any, opts ...Option) http.Handler {
 			continue
 		}
 
-		r := o.routeMapper(m.Name)
-		r.methodIndex = i
-		sh.routes = append(sh.routes, *r)
+		sh.methods[m.Name] = sv.Method(i)
 	}
 
 	return sh
 }
 
-func defaultRouteMapper(methodName string) *Route {
-	return &Route{
-		Method: http.MethodPost,
-		Path:   "/" + methodName,
-	}
+func defaultMatcher(r *http.Request, methodName string) ([]any, bool) {
+	return nil, r.Method == "POST" && r.URL.Path == "/"+methodName
 }
 
 func allowedMethod(typ reflect.Type) bool {
@@ -130,18 +139,30 @@ func allowedMethod(typ reflect.Type) bool {
 }
 
 func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	for _, route := range sh.routes {
-		fmt.Printf("checking route %s %s against %s %s\n", route.Method, route.Path, r.Method, r.URL.Path)
-		if route.Method != r.Method {
+	for name, method := range sh.methods {
+		args, matches := sh.matcher(r, name)
+		if !matches {
 			continue
 		}
 
-		if route.Path != r.URL.Path {
-			continue
+		methodArgs := make([]reflect.Value, method.Type().NumIn())
+		for i := 0; i < method.Type().NumIn(); i++ {
+			argType := method.Type().In(i)
+			switch argType {
+			case ctxType:
+				methodArgs[i] = reflect.ValueOf(r.Context())
+			case reqType:
+				methodArgs[i] = reflect.ValueOf(r)
+			default:
+				if len(args) == 0 {
+					panic("not enough arguments")
+				}
+				methodArgs[i] = reflect.ValueOf(args[0])
+				args = args[1:]
+			}
 		}
 
-		m := sh.structValue.Method(route.methodIndex)
-		result := m.Call(nil)
+		result := method.Call(nil)
 		if len(result) == 0 {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -176,6 +197,11 @@ func (sh *structHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Status code error
+
+// NewError returns a new Error with the given status code and wrapped
+// error.
 func NewError(statusCode int, err error) *Error {
 	return &Error{
 		StatusCode: statusCode,
