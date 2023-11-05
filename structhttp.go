@@ -156,7 +156,7 @@ func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 			if errors.As(last.Interface().(error), &statusCoder) {
 				code = statusCoder.HTTPStatusCode()
 			}
-			http.Error(w, last.Interface().(error).Error(), code)
+			writeError(w, last.Interface().(error), code)
 
 			return
 		}
@@ -176,6 +176,16 @@ func writeResponse(w http.ResponseWriter, out []reflect.Value) {
 	if err := json.NewEncoder(w).Encode(out[0].Interface()); err != nil {
 		panic(err)
 	}
+}
+
+func writeError(w http.ResponseWriter, err error, code int) {
+	// JSON encode the error
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": err.Error(),
+	})
 }
 
 func allowedMethod(typ reflect.Type) bool {
