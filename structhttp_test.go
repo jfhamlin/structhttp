@@ -2,6 +2,7 @@ package structhttp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -84,8 +85,18 @@ func runTests(t *testing.T, testCases []testCase, opts ...Option) {
 			if w.Code != tc.expectedStatusCode {
 				t.Errorf("expected status code %d, got %d", tc.expectedStatusCode, w.Code)
 			}
-			if w.Body.String() != tc.expectedBody {
-				t.Errorf("expected body %q, got %q", tc.expectedBody, w.Body.String())
+			if tc.expectedStatusCode >= 400 && tc.err != nil {
+				var errMap map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &errMap); err != nil {
+					t.Errorf("expected error response, got %q", w.Body.String())
+				}
+				if errMap["error"] != tc.err.Error() {
+					t.Errorf("expected error %q, got %q", tc.err.Error(), errMap["error"])
+				}
+			} else {
+				if w.Body.String() != tc.expectedBody {
+					t.Errorf("expected body %q, got %q", tc.expectedBody, w.Body.String())
+				}
 			}
 		})
 	}
@@ -113,7 +124,6 @@ func TestHandlerDefault(t *testing.T) {
 			path:               "/OnlyError",
 			err:                errors.New("test error"),
 			expectedStatusCode: 500,
-			expectedBody:       "test error\n",
 		},
 		{
 			name:               "only error, with HTTPStatusCoder error",
@@ -121,7 +131,6 @@ func TestHandlerDefault(t *testing.T) {
 			path:               "/OnlyError",
 			err:                NewError(400, errors.New("invalid request")),
 			expectedStatusCode: 400,
-			expectedBody:       "invalid request\n",
 		},
 		{
 			name:               "only result",
@@ -146,7 +155,6 @@ func TestHandlerDefault(t *testing.T) {
 			result:             map[string]string{"foo": "bar"},
 			err:                errors.New("test error"),
 			expectedStatusCode: 500,
-			expectedBody:       "test error\n",
 		},
 		{
 			name:               "inputs, no error",
@@ -162,7 +170,7 @@ func TestHandlerDefault(t *testing.T) {
 			path:               "/Inputs",
 			body:               "",
 			expectedStatusCode: 400,
-			expectedBody:       "failed to decode request body: EOF\n",
+			expectedBody:       "{\"error\":\"failed to decode request body: EOF\"}\n",
 		},
 		{
 			name:               "bytes, no error",
